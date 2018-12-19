@@ -38,15 +38,8 @@ public:
   {
   }
 
-  // METHODS
-
-  // 
-  void GetPicoScopeInfo(void);
-
-  //
-  void SetPicoScopeDefaults(void);
-
   // PICO Scope internals
+
   typedef enum {
     MODEL_NONE = 0,
     MODEL_PS2104 = 2104,
@@ -77,7 +70,6 @@ public:
     uint32_t						upper;
     PS2000_PULSE_WIDTH_TYPE			type;
   } PULSE_WIDTH_QUALIFIER;
-
 
   typedef struct
   {
@@ -131,8 +123,41 @@ public:
     int16_t			awgBufferSize;
   } UNIT_MODEL;
 
+  // PLUS structs
+  typedef enum {
+    DC = 0,
+    AC = 1
+  } COUPLING;
+
+  struct CHANNEL_SETUP
+  {
+    CHANNEL_SETUP(int channelNum) { this->channelNum = channelNum; };
+    int channelNum;
+    COUPLING coupling;
+    int voltageRangeMV;
+  };
+
+  // METHODS
+
+  // 
+  void GetPicoScopeInfo(void);
+
+  //
+  void SetPicoScopeDefaults(void);
+
+  // 
+  enPS2000Range ConvertRangeIntToEnum(int voltageRangeMV);
+
+  //
+  PlusStatus SetupPicoScopeChannel(CHANNEL_SETUP channel);
+
   // MEMBER VARIABLES
   UNIT_MODEL Scope;  // scope handle
+
+  int PSInputRanges[PS2000_MAX_RANGES] = { 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000 };
+
+  CHANNEL_SETUP Channel1Setup = CHANNEL_SETUP(-1);
+  CHANNEL_SETUP Channel2Setup = CHANNEL_SETUP(-1);
 };
 
 //----------------------------------------------------------------------------
@@ -324,6 +349,7 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
   }
 }
 
+//----------------------------------------------------------------------------
 void vtkPlusPicoScopeDataSource::vtkInternal::SetPicoScopeDefaults(void)
 {
   int16_t ch = 0;
@@ -338,6 +364,87 @@ void vtkPlusPicoScopeDataSource::vtkInternal::SetPicoScopeDefaults(void)
       this->Scope.channelSettings[ch].range);
   }
 }
+
+//----------------------------------------------------------------------------
+enPS2000Range vtkPlusPicoScopeDataSource::vtkInternal::ConvertRangeIntToEnum(int voltageRangeMV)
+{
+  switch (voltageRangeMV)
+  {
+  case 10:
+    return PS2000_10MV;
+  case 20:
+    return PS2000_20MV;
+  case 50:
+    return PS2000_50MV;
+  case 100:
+    return PS2000_100MV;
+  case 200:
+    return PS2000_200MV;
+  case 500:
+    return PS2000_500MV;
+  case 1000:
+    return PS2000_1V;
+  case 2000:
+    return PS2000_2V;
+  case 5000:
+    return PS2000_5V;
+  case 10000:
+    return PS2000_10V;
+  case 20000:
+    return PS2000_20V;
+  case 50000:
+    return PS2000_50V;
+  }
+}
+
+//----------------------------------------------------------------------------
+PlusStatus vtkPlusPicoScopeDataSource::vtkInternal::SetupPicoScopeChannel(CHANNEL_SETUP channel)
+{
+  // check channel is valid
+  if (!(channel.channelNum == 0 || (channel.channelNum == 1 && this->Scope.noOfChannels == 2)))
+  {
+    LOG_ERROR("Unsupported channel number. Check the number of channels your oscilloscope supports. Note: channel numbers start at 0.");
+    return PLUS_FAIL;
+  }
+
+  // check voltage is valid
+  bool voltageValid(false);
+  for (int i = this->Scope.firstRange; i <= this->Scope.lastRange; i++)
+  {
+    if (this->PSInputRanges[i] == channel.voltageRangeMV)
+    {
+      voltageValid = true;
+    }
+  }
+
+  if (!voltageValid)
+  {
+    std::string validVoltages;
+    for (int i = this->Scope.firstRange; i <= this->Scope.lastRange; i++)
+    {
+      validVoltages = validVoltages + " " + std::to_string(PSInputRanges[i]) + "mV,";
+    }
+    LOG_ERROR("Invalid voltage range. Please choose from: " << validVoltages);
+    return PLUS_FAIL;
+  }
+
+  // convert voltage into PS SDK compatible format
+  enPS2000Range voltageRangeEnum = this->ConvertRangeIntToEnum(channel.voltageRangeMV);
+
+  // convert coupling into PS SDK compatible format
+  bool couplingBool;
+  (channel.coupling == DC) ? couplingBool = true : couplingBool = false;
+  
+  // set channel values
+  if (!ps2000_set_channel(this->Scope.handle, channel.channelNum, true, couplingBool, voltageRangeEnum))
+  {
+    LOG_ERROR("Failed to set PicoScope channel settings.");
+    return PLUS_FAIL;
+  }
+
+  return PLUS_SUCCESS;
+}
+
 //----------------------------------------------------------------------------
 vtkPlusPicoScopeDataSource::vtkPlusPicoScopeDataSource()
   : vtkPlusDevice()
@@ -372,7 +479,48 @@ PlusStatus vtkPlusPicoScopeDataSource::ReadConfiguration(vtkXMLDataElement* root
 
   XML_FIND_DEVICE_ELEMENT_REQUIRED_FOR_READING(deviceConfig, rootConfigElement);
 
-  return PLUS_FAIL;
+  XML_FIND_NESTED_ELEMENT_REQUIRED(dataSourcesElement, deviceConfig, "DataSources");
+  for (int nestedElementIndex = 0; nestedElementIndex < dataSourcesElement->GetNumberOfNestedElements(); nestedElementIndex++)
+  {
+    vtkXMLDataElement* channelDataElement = dataSourcesElement->GetNestedElement(nestedElementIndex);
+    if (STRCASECMP(channelDataElement->GetName(), "DataSource") != 0)
+    {
+      // if this is not a data source element, skip it
+      continue;
+    }
+    if (channelDataElement->GetAttribute("Type") != NULL && STRCASECMP(channelDataElement->GetAttribute("Type"), "Video") != 0)
+    {
+      // if this is not a Video element, skip it
+      continue;
+    }
+    std::string toolId(channelDataElement->GetAttribute("Id"));
+    if (toolId.empty())
+    {
+      // Channel doesn't have ID needed to generate signal output
+      LOG_ERROR("Failed to initialize PicoScope channel: DataSource Id is missing.");
+      continue;
+    }
+
+    int channelNum;
+    XML_READ_SCALAR_ATTRIBUTE_NONMEMBER_REQUIRED(int, Channel, channelNum, channelDataElement);
+    int voltageRangeMV;
+    XML_READ_SCALAR_ATTRIBUTE_NONMEMBER_REQUIRED(int, VoltageRangeMV, voltageRangeMV, channelDataElement);
+    vtkInternal::COUPLING coupling = vtkInternal::DC;
+    XML_READ_ENUM2_ATTRIBUTE_NONMEMBER_OPTIONAL(Coupling, coupling, channelDataElement, "AC", vtkInternal::AC, "DC", vtkInternal::DC);
+
+    if (channelNum == 0 || channelNum == 1)
+    {
+      this->Internal->Channel1Setup.channelNum = channelNum;
+      this->Internal->Channel1Setup.coupling = coupling;
+      this->Internal->Channel1Setup.voltageRangeMV = voltageRangeMV;
+    }
+    else
+    {
+      LOG_ERROR("Invalid channel number: " << channelNum << ". Options are 0 (Channel A), and 1 (Channel B, if supported by your hardware).");
+    }
+  }
+
+  return PLUS_SUCCESS;
 }
 
 //----------------------------------------------------------------------------
@@ -380,7 +528,7 @@ PlusStatus vtkPlusPicoScopeDataSource::WriteConfiguration(vtkXMLDataElement* roo
 {
   LOG_TRACE("vtkPlusPicoScopeDataSource::WriteConfiguration");
 
-  return PLUS_FAIL;
+  return PLUS_SUCCESS;
 }
 
 //----------------------------------------------------------------------------
@@ -424,7 +572,7 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalStartRecording()
 {
   LOG_TRACE("vtkPlusPicoScopeDataSource::InternalStartRecording");
 
-  return PLUS_FAIL;
+  return PLUS_SUCCESS;
 }
 
 //----------------------------------------------------------------------------
@@ -432,7 +580,7 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalStopRecording()
 {
   LOG_TRACE("vtkPlusPicoScopeDataSource::InternalStopRecording");
 
-  return PLUS_FAIL;
+  return PLUS_SUCCESS;
 }
 
 //----------------------------------------------------------------------------
