@@ -9,8 +9,11 @@ See License.txt for details.
 // Local includes
 #include "vtkIGSIOAccurateTimer.h"
 #include "vtkPlusPicoScopeDataSource.h"
+#include "vtkPlusDataSource.h"
 
 // VTK includes
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 
 // System includes
 
@@ -21,7 +24,7 @@ See License.txt for details.
 vtkStandardNewMacro(vtkPlusPicoScopeDataSource);
 
 // constants
-#define BUFFER_SIZE 	1024 // pico scope buffer size
+#define BUFFER_SIZE  1024 // pico scope buffer size
 
 //----------------------------------------------------------------------------
 class vtkPlusPicoScopeDataSource::vtkInternal
@@ -54,21 +57,21 @@ public:
 
   typedef struct
   {
-    PS2000_THRESHOLD_DIRECTION	channelA;
-    PS2000_THRESHOLD_DIRECTION	channelB;
-    PS2000_THRESHOLD_DIRECTION	channelC;
-    PS2000_THRESHOLD_DIRECTION	channelD;
-    PS2000_THRESHOLD_DIRECTION	ext;
+    PS2000_THRESHOLD_DIRECTION channelA;
+    PS2000_THRESHOLD_DIRECTION channelB;
+    PS2000_THRESHOLD_DIRECTION channelC;
+    PS2000_THRESHOLD_DIRECTION channelD;
+    PS2000_THRESHOLD_DIRECTION ext;
   } DIRECTIONS;
 
   typedef struct
   {
-    PS2000_PWQ_CONDITIONS			*	conditions;
-    int16_t							nConditions;
-    PS2000_THRESHOLD_DIRECTION		direction;
-    uint32_t						lower;
-    uint32_t						upper;
-    PS2000_PULSE_WIDTH_TYPE			type;
+    PS2000_PWQ_CONDITIONS   * conditions;
+    int16_t       nConditions;
+    PS2000_THRESHOLD_DIRECTION  direction;
+    uint32_t      lower;
+    uint32_t      upper;
+    PS2000_PULSE_WIDTH_TYPE   type;
   } PULSE_WIDTH_QUALIFIER;
 
   typedef struct
@@ -107,20 +110,20 @@ public:
 
   // struct to hold scope handle
   typedef struct {
-    int16_t			handle;
-    MODEL_TYPE		model;
-    PS2000_RANGE	firstRange;
-    PS2000_RANGE	lastRange;
+    int16_t   handle;
+    MODEL_TYPE  model;
+    PS2000_RANGE firstRange;
+    PS2000_RANGE lastRange;
     TRIGGER_CHANNEL trigger;
-    int16_t			maxTimebase;
-    int16_t			timebases;
-    int16_t			noOfChannels;
+    int16_t   maxTimebase;
+    int16_t   timebases;
+    int16_t   noOfChannels;
     CHANNEL_SETTINGS channelSettings[PS2000_MAX_CHANNELS];
-    int16_t			hasAdvancedTriggering;
-    int16_t			hasFastStreaming;
-    int16_t			hasEts;
-    int16_t			hasSignalGenerator;
-    int16_t			awgBufferSize;
+    int16_t   hasAdvancedTriggering;
+    int16_t   hasFastStreaming;
+    int16_t   hasEts;
+    int16_t   hasSignalGenerator;
+    int16_t   awgBufferSize;
   } UNIT_MODEL;
 
   // PLUS structs
@@ -131,7 +134,11 @@ public:
 
   struct CHANNEL_SETUP
   {
-    CHANNEL_SETUP(int channelNum) { this->channelNum = channelNum; };
+    bool enabled;
+    CHANNEL_SETUP(bool enabled, int channelNum) { 
+      this->enabled = enabled;
+      this->channelNum = channelNum;
+    };
     int channelNum;
     COUPLING coupling;
     int voltageRangeMV;
@@ -149,15 +156,28 @@ public:
   enPS2000Range ConvertRangeIntToEnum(int voltageRangeMV);
 
   //
+  char* GetAdcUnits(int16_t time_units);
+  
+  //
+  int32_t AdcToMv(int32_t raw, int32_t ch);
+
+  //
   PlusStatus SetupPicoScopeChannel(CHANNEL_SETUP channel);
+
+  //
+  PlusStatus SetPicoScopeTimebase(int timebase, int numSamples);
 
   // MEMBER VARIABLES
   UNIT_MODEL Scope;  // scope handle
 
   int PSInputRanges[PS2000_MAX_RANGES] = { 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000 };
 
-  CHANNEL_SETUP Channel1Setup = CHANNEL_SETUP(-1);
-  CHANNEL_SETUP Channel2Setup = CHANNEL_SETUP(-1);
+  CHANNEL_SETUP Channel1Setup = CHANNEL_SETUP(false, -1);
+  CHANNEL_SETUP Channel2Setup = CHANNEL_SETUP(false, -1);
+
+  int32_t scale_to_mv = 1;
+
+  vtkSmartPointer<vtkImageData> SignalImage = vtkSmartPointer<vtkImageData>::New();
 };
 
 //----------------------------------------------------------------------------
@@ -172,9 +192,9 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
                 "Error Code       ",
                 "Kernel Driver    "
   };
-  int16_t 	i;
-  int8_t		line[80];
-  int32_t		variant;
+  int16_t i;
+  int8_t line[80];
+  int32_t variant;
 
   if (this->Scope.handle)
   {
@@ -190,7 +210,7 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
         {
           line[4] = toupper(line[4]);
 
-          if (line[1] == '2' && line[4] == 'A')		// i.e 2204A -> 0xA204
+          if (line[1] == '2' && line[4] == 'A')  // i.e 2204A -> 0xA204
           {
             variant += 0x9968;
           }
@@ -394,16 +414,54 @@ enPS2000Range vtkPlusPicoScopeDataSource::vtkInternal::ConvertRangeIntToEnum(int
     return PS2000_20V;
   case 50000:
     return PS2000_50V;
+  default:
+    LOG_WARNING("Invalid voltage range: " << voltageRangeMV << ".");
   }
+}
+
+//----------------------------------------------------------------------------
+
+char* vtkPlusPicoScopeDataSource::vtkInternal::GetAdcUnits(int16_t time_units)
+{
+  time_units++;
+  //printf ( "time unit:  %d\n", time_units ) ;
+  switch (time_units)
+  {
+  case 0:
+    return "ADC";
+  case 1:
+    return "fs";
+  case 2:
+    return "ps";
+  case 3:
+    return "ns";
+  case 4:
+    return "us";
+  case 5:
+    return "ms";
+  }
+
+  return "Not Known";
+}
+
+int32_t vtkPlusPicoScopeDataSource::vtkInternal::AdcToMv(int32_t raw, int32_t ch)
+{
+  return (scale_to_mv) ? (raw * PSInputRanges[ch]) / 32767 : raw;
 }
 
 //----------------------------------------------------------------------------
 PlusStatus vtkPlusPicoScopeDataSource::vtkInternal::SetupPicoScopeChannel(CHANNEL_SETUP channel)
 {
+  // check this channel is enabled
+  if (!channel.enabled)
+  {
+    return PLUS_SUCCESS;
+  }
+
   // check channel is valid
   if (!(channel.channelNum == 0 || (channel.channelNum == 1 && this->Scope.noOfChannels == 2)))
   {
-    LOG_ERROR("Unsupported channel number. Check the number of channels your oscilloscope supports. Note: channel numbers start at 0.");
+    LOG_ERROR("Unsupported channel number: " << channel.channelNum << ". Check the number of channels your oscilloscope supports. Note: channel numbers start at 0.");
     return PLUS_FAIL;
   }
 
@@ -444,6 +502,13 @@ PlusStatus vtkPlusPicoScopeDataSource::vtkInternal::SetupPicoScopeChannel(CHANNE
 
   return PLUS_SUCCESS;
 }
+
+//----------------------------------------------------------------------------
+PlusStatus SetPicoScopeTimebase(int timebase, int numSamples)
+{
+  return PLUS_SUCCESS;
+}
+
 
 //----------------------------------------------------------------------------
 vtkPlusPicoScopeDataSource::vtkPlusPicoScopeDataSource()
@@ -488,9 +553,9 @@ PlusStatus vtkPlusPicoScopeDataSource::ReadConfiguration(vtkXMLDataElement* root
       // if this is not a data source element, skip it
       continue;
     }
-    if (channelDataElement->GetAttribute("Type") != NULL && STRCASECMP(channelDataElement->GetAttribute("Type"), "Video") != 0)
+    if (channelDataElement->GetAttribute("Type") != NULL && STRCASECMP(channelDataElement->GetAttribute("Type"), "Tool") != 0)
     {
-      // if this is not a Video element, skip it
+      // if this is not a Tool element, skip it
       continue;
     }
     std::string toolId(channelDataElement->GetAttribute("Id"));
@@ -508,9 +573,18 @@ PlusStatus vtkPlusPicoScopeDataSource::ReadConfiguration(vtkXMLDataElement* root
     vtkInternal::COUPLING coupling = vtkInternal::DC;
     XML_READ_ENUM2_ATTRIBUTE_NONMEMBER_OPTIONAL(Coupling, coupling, channelDataElement, "AC", vtkInternal::AC, "DC", vtkInternal::DC);
 
-    if (channelNum == 0 || channelNum == 1)
+    LOG_INFO(channelNum);
+    if (channelNum == 0)
     {
-      this->Internal->Channel1Setup.channelNum = channelNum;
+      this->Internal->Channel1Setup.enabled = true;
+      this->Internal->Channel1Setup.channelNum = 0;
+      this->Internal->Channel1Setup.coupling = coupling;
+      this->Internal->Channel1Setup.voltageRangeMV = voltageRangeMV;
+    }
+    else if (channelNum == 1)
+    {
+      this->Internal->Channel1Setup.enabled = true;
+      this->Internal->Channel1Setup.channelNum = 1;
       this->Internal->Channel1Setup.coupling = coupling;
       this->Internal->Channel1Setup.voltageRangeMV = voltageRangeMV;
     }
@@ -550,12 +624,17 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalConnect()
   if (!this->Internal->Scope.handle)
   {
     // scope is not connected
-    LOG_INFO("Failed to connect to PicoScope PS2000.");
+    LOG_ERROR("Failed to connect to PicoScope PS2000.");
     return PLUS_FAIL;
   }
 
   this->Internal->GetPicoScopeInfo();
 
+  this->Internal->SetupPicoScopeChannel(this->Internal->Channel1Setup);
+  this->Internal->SetupPicoScopeChannel(this->Internal->Channel2Setup);
+
+  this->Internal->SignalImage->SetDimensions(BUFFER_SIZE, 1, 1);
+  this->Internal->SignalImage->AllocateScalars(VTK_INT, 1);
   return PLUS_SUCCESS;
 }
 
@@ -588,6 +667,118 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 {
   LOG_TRACE("vtkPlusPicoScopeDataSource::InternalUpdate");
   
+  int32_t  i;
+  int32_t  time_interval;
+  int16_t  time_units;
+  int16_t  oversample;
+  int32_t  no_of_samples = BUFFER_SIZE;
+  FILE *  fp;
+  int16_t  auto_trigger_ms = 0;
+  int32_t  time_indisposed_ms;
+  int16_t  overflow;
+  int32_t  max_samples;
+  int16_t  ch = 0;
+
+  /* Trigger disabled */
+  ps2000_set_trigger(this->Internal->Scope.handle, PS2000_NONE, 0, PS2000_RISING, 0, auto_trigger_ms);
+
+  /*  Find the maximum number of samples, the time interval (in time_units),
+  *   the most suitable time units, and the maximum oversample at the current timebase
+  */
+  oversample = 1;
+  int timebase = 10;
+  while (!ps2000_get_timebase(this->Internal->Scope.handle,
+    timebase,
+    no_of_samples,
+    &time_interval,
+    &time_units,
+    oversample,
+    &max_samples))
+    timebase++;
+
+
+  /* Start it collecting,
+  *  then wait for completion
+  */
+
+  ps2000_run_block(this->Internal->Scope.handle, no_of_samples, timebase, oversample, &time_indisposed_ms);
+
+  while (!ps2000_ready(this->Internal->Scope.handle))
+  {
+    Sleep(100);
+  }
+
+  ps2000_stop(this->Internal->Scope.handle);
+
+  int32_t times[BUFFER_SIZE];
+
+  /* Should be done now...
+  *  get the times (in nanoseconds)
+  *   and the values (in ADC counts)
+  */
+  ps2000_get_times_and_values(this->Internal->Scope.handle, times,
+    this->Internal->Scope.channelSettings[PS2000_CHANNEL_A].values,
+    this->Internal->Scope.channelSettings[PS2000_CHANNEL_B].values,
+    NULL,
+    NULL,
+    &overflow, time_units, no_of_samples);
+
+  int signalim[BUFFER_SIZE];
+  for (int i = 0; i < BUFFER_SIZE; i++)
+  {
+    signalim[i] = (int)this->Internal->Scope.channelSettings[PS2000_CHANNEL_A].values[i];
+  }
+
+  memcpy(this->Internal->SignalImage->GetScalarPointer(), signalim, BUFFER_SIZE);
+
+
+  int max = -10000;
+  int mean = 0;
+  for (int i = 0; i < BUFFER_SIZE; i++)
+  {
+    if (signalim[i] > max)
+    {
+      max = signalim[i];
+    }
+    mean += abs(signalim[i]);
+  }
+  mean = mean / BUFFER_SIZE;
+
+  // send sum, max of signal block in x transform position
+  vtkNew<vtkMatrix4x4> sigmaxTransform;
+  sigmaxTransform->Identity();
+  sigmaxTransform->SetElement(0, 3, max);
+  sigmaxTransform->SetElement(1, 3, mean);
+  igsioTransformName toolTransformName("Signal", this->GetToolReferenceFrameName());
+  std::string toolSourceId = toolTransformName.GetTransformName();
+  const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
+  ToolTimeStampedUpdate(toolSourceId, sigmaxTransform.Get(), TOOL_OK, this->FrameNumber, unfilteredTimestamp);
+
+  // TODO: Send signal vector as ndarray over openigtlink
+  //// transfer data into image
+  //vtkPlusDataSource* aSource(NULL);
+  //if (this->GetFirstVideoSource(aSource) != PLUS_SUCCESS)
+  //{
+  //  LOG_ERROR("Unable to retrieve the video source in the PicoScope device.");
+  //  return PLUS_FAIL;
+  //}
+
+  //FrameSizeType frameSizeInPx = { BUFFER_SIZE, 1, 1 };
+
+  //if (aSource->GetNumberOfItems() == 0)
+  //{
+  //  // initialize the video source
+  //  aSource->SetImageType(US_IMG_TYPE_XX);
+  //  aSource->SetPixelType(VTK_INT);
+  //  aSource->SetNumberOfScalarComponents(1);
+  //  aSource->SetInputFrameSize(frameSizeInPx);
+  //  aSource->SetInputImageOrientation(US_IMG_ORIENT_MF);
+  //}
+
+  //
+  //aSource->AddItem(this->Internal->SignalImage, US_IMG_ORIENT_MF, US_IMG_TYPE_XX, this->FrameNumber);
+  //this->Modified();
+
   this->FrameNumber++;
  
   return PLUS_FAIL;
