@@ -142,6 +142,7 @@ public:
     int channelNum;
     COUPLING coupling;
     int voltageRangeMV;
+    std::string toolId;
   };
 
   // METHODS
@@ -172,8 +173,8 @@ public:
 
   int PSInputRanges[PS2000_MAX_RANGES] = { 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000 };
 
-  CHANNEL_SETUP Channel1Setup = CHANNEL_SETUP(false, -1);
-  CHANNEL_SETUP Channel2Setup = CHANNEL_SETUP(false, -1);
+  CHANNEL_SETUP ChannelA = CHANNEL_SETUP(false, -1);
+  CHANNEL_SETUP ChannelB = CHANNEL_SETUP(false, -1);
 
   int32_t scale_to_mv = 1;
 
@@ -576,17 +577,19 @@ PlusStatus vtkPlusPicoScopeDataSource::ReadConfiguration(vtkXMLDataElement* root
     LOG_INFO(channelNum);
     if (channelNum == 0)
     {
-      this->Internal->Channel1Setup.enabled = true;
-      this->Internal->Channel1Setup.channelNum = 0;
-      this->Internal->Channel1Setup.coupling = coupling;
-      this->Internal->Channel1Setup.voltageRangeMV = voltageRangeMV;
+      this->Internal->ChannelA.enabled = true;
+      this->Internal->ChannelA.channelNum = 0;
+      this->Internal->ChannelA.coupling = coupling;
+      this->Internal->ChannelA.voltageRangeMV = voltageRangeMV;
+      this->Internal->ChannelA.toolId = toolId;
     }
     else if (channelNum == 1)
     {
-      this->Internal->Channel1Setup.enabled = true;
-      this->Internal->Channel1Setup.channelNum = 1;
-      this->Internal->Channel1Setup.coupling = coupling;
-      this->Internal->Channel1Setup.voltageRangeMV = voltageRangeMV;
+      this->Internal->ChannelB.enabled = true;
+      this->Internal->ChannelB.channelNum = 1;
+      this->Internal->ChannelB.coupling = coupling;
+      this->Internal->ChannelB.voltageRangeMV = voltageRangeMV;
+      this->Internal->ChannelB.toolId = toolId;
     }
     else
     {
@@ -630,8 +633,8 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalConnect()
 
   this->Internal->GetPicoScopeInfo();
 
-  this->Internal->SetupPicoScopeChannel(this->Internal->Channel1Setup);
-  this->Internal->SetupPicoScopeChannel(this->Internal->Channel2Setup);
+  this->Internal->SetupPicoScopeChannel(this->Internal->ChannelA);
+  this->Internal->SetupPicoScopeChannel(this->Internal->ChannelB);
 
   this->Internal->SignalImage->SetDimensions(BUFFER_SIZE, 1, 1);
   this->Internal->SignalImage->AllocateScalars(VTK_INT, 1);
@@ -705,54 +708,75 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 
   while (!ps2000_ready(this->Internal->Scope.handle))
   {
-    Sleep(100);
+    Sleep(10);
   }
 
   ps2000_stop(this->Internal->Scope.handle);
 
   int32_t times[BUFFER_SIZE];
 
-  /* Should be done now...
-  *  get the times (in nanoseconds)
-  *   and the values (in ADC counts)
-  */
-  ps2000_get_times_and_values(this->Internal->Scope.handle, times,
+  ps2000_get_times_and_values(
+    this->Internal->Scope.handle,
+    times,
     this->Internal->Scope.channelSettings[PS2000_CHANNEL_A].values,
     this->Internal->Scope.channelSettings[PS2000_CHANNEL_B].values,
     NULL,
     NULL,
     &overflow, time_units, no_of_samples);
 
-  int signalim[BUFFER_SIZE];
-  for (int i = 0; i < BUFFER_SIZE; i++)
+  if (this->Internal->ChannelA.enabled == true)
   {
-    signalim[i] = (int)this->Internal->Scope.channelSettings[PS2000_CHANNEL_A].values[i];
-  }
-
-  memcpy(this->Internal->SignalImage->GetScalarPointer(), signalim, BUFFER_SIZE);
-
-
-  int max = -10000;
-  int mean = 0;
-  for (int i = 0; i < BUFFER_SIZE; i++)
-  {
-    if (signalim[i] > max)
+    int signal;
+    int max = -1000000;
+    int mean = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++)
     {
-      max = signalim[i];
+      signal = (int)this->Internal->Scope.channelSettings[PS2000_CHANNEL_A].values[i];
+      if (signal > max)
+      {
+        max = signal;
+      }
+      mean += (abs(signal));
     }
-    mean += abs(signalim[i]);
+    mean = mean / BUFFER_SIZE;
+    
+    // put max/mean in transorm and add to buffer
+    vtkNew<vtkMatrix4x4> sigmaxTransform;
+    sigmaxTransform->Identity();
+    sigmaxTransform->SetElement(0, 3, max);
+    sigmaxTransform->SetElement(1, 3, mean);
+    igsioTransformName toolTransformName(this->Internal->ChannelA.toolId, this->GetToolReferenceFrameName());
+    std::string toolSourceId = toolTransformName.GetTransformName();
+    const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
+    ToolTimeStampedUpdate(toolSourceId, sigmaxTransform.Get(), TOOL_OK, this->FrameNumber, unfilteredTimestamp);
   }
-  mean = mean / BUFFER_SIZE;
+  
+  if (this->Internal->ChannelB.enabled == true)
+  {
+    int signal;
+    int max = -1000000;
+    int mean = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++)
+    {
+      signal = (int)this->Internal->Scope.channelSettings[PS2000_CHANNEL_B].values[i];
+      if (signal > max)
+      {
+        max = signal;
+      }
+      mean += (abs(signal));
+    }
+    mean = mean / BUFFER_SIZE;
 
-  // send sum, max of signal block in x transform position
-  vtkNew<vtkMatrix4x4> sigmaxTransform;
-  sigmaxTransform->Identity();
-  sigmaxTransform->SetElement(0, 3, max);
-  sigmaxTransform->SetElement(1, 3, mean);
-  igsioTransformName toolTransformName("Signal", this->GetToolReferenceFrameName());
-  std::string toolSourceId = toolTransformName.GetTransformName();
-  const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
-  ToolTimeStampedUpdate(toolSourceId, sigmaxTransform.Get(), TOOL_OK, this->FrameNumber, unfilteredTimestamp);
+    // put max/mean in transorm and add to buffer
+    vtkNew<vtkMatrix4x4> sigmaxTransform;
+    sigmaxTransform->Identity();
+    sigmaxTransform->SetElement(0, 3, max);
+    sigmaxTransform->SetElement(1, 3, mean);
+    igsioTransformName toolTransformName(this->Internal->ChannelB.toolId, this->GetToolReferenceFrameName());
+    std::string toolSourceId = toolTransformName.GetTransformName();
+    const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
+    ToolTimeStampedUpdate(toolSourceId, sigmaxTransform.Get(), TOOL_OK, this->FrameNumber, unfilteredTimestamp);
+  }
 
   // TODO: Send signal vector as ndarray over openigtlink
   //// transfer data into image
