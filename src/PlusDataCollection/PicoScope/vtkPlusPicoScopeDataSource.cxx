@@ -13,10 +13,11 @@ See License.txt for details.
 
 // VTK includes
 #include <vtkMatrix4x4.h>
-#include <vtkNew.h>
+#include <vtkSmartPointer.h>
 
-// System includes
-
+// STL includes
+#include <string>
+#include <sstream>
 
 // PicoScope includes
 #include "ps2000.h"
@@ -101,13 +102,6 @@ public:
     ADVANCED advanced;
   } TRIGGER_CHANNEL;
 
-  typedef struct {
-    int16_t DCcoupled;
-    int16_t range;
-    int16_t enabled;
-    int16_t values[BUFFER_SIZE];
-  } CHANNEL_SETTINGS;
-
   // struct to hold scope handle
   typedef struct {
     int16_t   handle;
@@ -118,7 +112,6 @@ public:
     int16_t   maxTimebase;
     int16_t   timebases;
     int16_t   noOfChannels;
-    CHANNEL_SETTINGS channelSettings[PS2000_MAX_CHANNELS];
     int16_t   hasAdvancedTriggering;
     int16_t   hasFastStreaming;
     int16_t   hasEts;
@@ -132,32 +125,25 @@ public:
     AC = 1
   } COUPLING;
 
-  struct CHANNEL_SETUP
-  {
-    bool enabled;
-    CHANNEL_SETUP(bool enabled, int channelNum) { 
-      this->enabled = enabled;
-      this->channelNum = channelNum;
-    };
-    int channelNum;
+  typedef struct {
     COUPLING coupling;
-    int voltageRangeMV;
-    std::string toolId;
-  };
+    PS2000_RANGE voltageRange; 
+    int16_t enabled;
+
+    std::string PlusSourceId;
+    vtkPlusDataSource* PlusSource;
+  } CHANNEL_SETTINGS;
 
   // METHODS
 
   // 
-  void GetPicoScopeInfo(void);
-
-  //
-  void SetPicoScopeDefaults(void);
+  std::string GetPicoScopeInfo(void);
 
   // 
   enPS2000Range ConvertRangeIntToEnum(int voltageRangeMV);
 
   //
-  char* GetAdcUnits(int16_t time_units);
+  std::string GetAdcUnits(int16_t time_units);
   
   //
   int32_t AdcToMv(int32_t raw, int32_t ch);
@@ -173,8 +159,8 @@ public:
 
   int PSInputRanges[PS2000_MAX_RANGES] = { 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000 };
 
-  CHANNEL_SETUP ChannelA = CHANNEL_SETUP(false, -1);
-  CHANNEL_SETUP ChannelB = CHANNEL_SETUP(false, -1);
+  CHANNEL_SETTINGS ChannelA = CHANNEL_SETUP(false, -1);
+  CHANNEL_SETTINGS ChannelB = CHANNEL_SETUP(false, -1);
 
   int32_t scale_to_mv = 1;
 
@@ -182,7 +168,7 @@ public:
 };
 
 //----------------------------------------------------------------------------
-void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
+std::string vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
 {
   int8_t description[8][25] = { "Driver Version   ",
                 "USB Version      ",
@@ -196,6 +182,9 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
   int16_t i;
   int8_t line[80];
   int32_t variant;
+
+  // stringstream to contain device info
+  std::stringstream deviceInfoSS;
 
   if (this->Scope.handle)
   {
@@ -220,7 +209,7 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
 
       if (i != 6) // No need to print error code
       {
-        printf("%s: %s\n", description[i], line);
+        deviceInfoSS << description[i] << " " << line << std::endl;
       }
     }
 
@@ -233,10 +222,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2104_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 1;
-      this->Scope.hasAdvancedTriggering = FALSE;
-      this->Scope.hasSignalGenerator = FALSE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = FALSE;
+      this->Scope.hasAdvancedTriggering = false;
+      this->Scope.hasSignalGenerator = false;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = false;
       break;
 
     case MODEL_PS2105:
@@ -246,10 +235,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2105_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 1;
-      this->Scope.hasAdvancedTriggering = FALSE;
-      this->Scope.hasSignalGenerator = FALSE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = FALSE;
+      this->Scope.hasAdvancedTriggering = false;
+      this->Scope.hasSignalGenerator = false;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = false;
       break;
 
     case MODEL_PS2202:
@@ -259,10 +248,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2200_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 2;
-      this->Scope.hasAdvancedTriggering = TRUE;
-      this->Scope.hasSignalGenerator = FALSE;
-      this->Scope.hasEts = FALSE;
-      this->Scope.hasFastStreaming = TRUE;
+      this->Scope.hasAdvancedTriggering = true;
+      this->Scope.hasSignalGenerator = false;
+      this->Scope.hasEts = false;
+      this->Scope.hasFastStreaming = true;
       break;
 
     case MODEL_PS2203:
@@ -272,10 +261,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2200_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 2;
-      this->Scope.hasAdvancedTriggering = FALSE;
-      this->Scope.hasSignalGenerator = TRUE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = TRUE;
+      this->Scope.hasAdvancedTriggering = false;
+      this->Scope.hasSignalGenerator = true;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = true;
       break;
 
     case MODEL_PS2204:
@@ -285,10 +274,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2200_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 2;
-      this->Scope.hasAdvancedTriggering = TRUE;
-      this->Scope.hasSignalGenerator = TRUE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = TRUE;
+      this->Scope.hasAdvancedTriggering = true;
+      this->Scope.hasSignalGenerator = true;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = true;
       break;
 
     case MODEL_PS2204A:
@@ -298,10 +287,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2200_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 2;
-      this->Scope.hasAdvancedTriggering = TRUE;
-      this->Scope.hasSignalGenerator = TRUE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = TRUE;
+      this->Scope.hasAdvancedTriggering = true;
+      this->Scope.hasSignalGenerator = true;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = true;
       this->Scope.awgBufferSize = 4096;
       break;
 
@@ -312,10 +301,10 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2200_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 2;
-      this->Scope.hasAdvancedTriggering = TRUE;
-      this->Scope.hasSignalGenerator = TRUE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = TRUE;
+      this->Scope.hasAdvancedTriggering = true;
+      this->Scope.hasSignalGenerator = true;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = true;
       break;
 
     case MODEL_PS2205A:
@@ -325,69 +314,36 @@ void vtkPlusPicoScopeDataSource::vtkInternal::GetPicoScopeInfo()
       this->Scope.maxTimebase = PS2200_MAX_TIMEBASE;
       this->Scope.timebases = this->Scope.maxTimebase;
       this->Scope.noOfChannels = 2;
-      this->Scope.hasAdvancedTriggering = TRUE;
-      this->Scope.hasSignalGenerator = TRUE;
-      this->Scope.hasEts = TRUE;
-      this->Scope.hasFastStreaming = TRUE;
+      this->Scope.hasAdvancedTriggering = true;
+      this->Scope.hasSignalGenerator = true;
+      this->Scope.hasEts = true;
+      this->Scope.hasFastStreaming = true;
       this->Scope.awgBufferSize = 4096;
       break;
 
     default:
-      printf("Unit not supported");
+      LOG_ERROR("PicoScope model not supported.");
     }
-
-    this->Scope.channelSettings[PS2000_CHANNEL_A].enabled = 1;
-    this->Scope.channelSettings[PS2000_CHANNEL_A].DCcoupled = 1;
-    this->Scope.channelSettings[PS2000_CHANNEL_A].range = PS2000_5V;
-
-    if (this->Scope.noOfChannels == 2)
-    {
-      this->Scope.channelSettings[PS2000_CHANNEL_B].enabled = 1;
-    }
-    else
-    {
-      this->Scope.channelSettings[PS2000_CHANNEL_B].enabled = 0;
-    }
-
-    this->Scope.channelSettings[PS2000_CHANNEL_B].DCcoupled = 1;
-    this->Scope.channelSettings[PS2000_CHANNEL_B].range = PS2000_5V;
-
-    this->SetPicoScopeDefaults();
-
   }
   else
   {
-    printf("Unit Not Opened\n");
+    LOG_ERROR("Failed to open PicoScope device.");
 
     ps2000_get_unit_info(this->Scope.handle, line, sizeof(line), 5);
 
-    printf("%s: %s\n", description[5], line);
+    deviceInfoSS << description[5] << " " << line);
     this->Scope.model = MODEL_NONE;
     this->Scope.firstRange = PS2000_100MV;
     this->Scope.lastRange = PS2000_20V;
     this->Scope.timebases = PS2105_MAX_TIMEBASE;
     this->Scope.noOfChannels = 1;
   }
+
+  return deviceInfoSS.str();
 }
 
 //----------------------------------------------------------------------------
-void vtkPlusPicoScopeDataSource::vtkInternal::SetPicoScopeDefaults(void)
-{
-  int16_t ch = 0;
-  ps2000_set_ets(this->Scope.handle, PS2000_ETS_OFF, 0, 0);
-
-  for (ch = 0; ch < this->Scope.noOfChannels; ch++)
-  {
-    ps2000_set_channel(this->Scope.handle,
-      ch,
-      this->Scope.channelSettings[ch].enabled,
-      this->Scope.channelSettings[ch].DCcoupled,
-      this->Scope.channelSettings[ch].range);
-  }
-}
-
-//----------------------------------------------------------------------------
-enPS2000Range vtkPlusPicoScopeDataSource::vtkInternal::ConvertRangeIntToEnum(int voltageRangeMV)
+PS2000_RANGE vtkPlusPicoScopeDataSource::vtkInternal::ConvertRangeIntToEnum(int voltageRangeMV)
 {
   switch (voltageRangeMV)
   {
@@ -416,13 +372,13 @@ enPS2000Range vtkPlusPicoScopeDataSource::vtkInternal::ConvertRangeIntToEnum(int
   case 50000:
     return PS2000_50V;
   default:
-    LOG_WARNING("Invalid voltage range: " << voltageRangeMV << ".");
+    LOG_WARNING("Invalid voltage range: " << voltageRangeMV << ". Using default range of 5V.");
   }
 }
 
 //----------------------------------------------------------------------------
 
-char* vtkPlusPicoScopeDataSource::vtkInternal::GetAdcUnits(int16_t time_units)
+std::string vtkPlusPicoScopeDataSource::vtkInternal::GetAdcUnits(int16_t time_units)
 {
   time_units++;
   //printf ( "time unit:  %d\n", time_units ) ;
@@ -708,7 +664,7 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 
   while (!ps2000_ready(this->Internal->Scope.handle))
   {
-    Sleep(10);
+    vtkIGSIOAccurateTimer::Delay(10);
   }
 
   ps2000_stop(this->Internal->Scope.handle);
