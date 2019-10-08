@@ -46,6 +46,9 @@ public:
   /*!  */
   PlusStatus InternalUpdate();
 
+	vtkGetMacro(NumberOfSamples, int);
+	vtkSetMacro(NumberOfSamples, int);
+
 protected:
   vtkPlusPicoScopeDataSource();
   ~vtkPlusPicoScopeDataSource();
@@ -62,6 +65,9 @@ private: // Functions
 
   class vtkInternal;
   vtkInternal* Internal;
+
+	int NumberOfSamples;
+
 };
 
 #endif

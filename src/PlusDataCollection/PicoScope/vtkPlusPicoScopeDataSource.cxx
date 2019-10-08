@@ -24,8 +24,7 @@ See License.txt for details.
 
 vtkStandardNewMacro(vtkPlusPicoScopeDataSource);
 
-// constants
-#define BUFFER_SIZE  1024 // pico scope buffer size
+static const int MAX_NUM_SAMPLES_PER_FRAME = 50000;
 
 //-------------------------------------------------------------------------------------------------
 class vtkPlusPicoScopeDataSource::vtkInternal
@@ -163,10 +162,6 @@ public:
 	// Print channel settings
 	void PrintChannelInfo(PICO_CHANNEL_SETTINGS channelSettings);
 
-  // Set timebase / number of samples to acquire
-  PlusStatus SetPicoScopeTimebase(int timebase, int numSamples);
-
-
 protected:
 	// MEMBER VARIABLES
 
@@ -178,18 +173,14 @@ protected:
   PICO_CHANNEL_SETTINGS ChannelA;
   PICO_CHANNEL_SETTINGS ChannelB;
 
-	int32_t  i;
-	int32_t  time_interval;
-	int16_t  time_units;
-	int16_t  oversample;
-	int32_t  no_of_samples = BUFFER_SIZE;
-	int32_t  time_indisposed_ms;
-	int16_t  overflow;
-	int32_t  max_samples;
-	int16_t  ch = 0;
-	int timebase;
+	// scope acquisition timing variables
+	int AppliedNumberOfSamples;
+	int AppliedTimeUnits;
+	int AppliedTimebase;
 
-
+	int16_t SignalARaw[MAX_NUM_SAMPLES_PER_FRAME];
+	int16_t SignalBRaw[MAX_NUM_SAMPLES_PER_FRAME];
+	int32_t Times[MAX_NUM_SAMPLES_PER_FRAME];
   vtkSmartPointer<vtkImageData> SignalAImage = vtkSmartPointer<vtkImageData>::New();
 	vtkSmartPointer<vtkImageData> SignalBImage = vtkSmartPointer<vtkImageData>::New();
 };
@@ -441,30 +432,30 @@ std::string vtkPlusPicoScopeDataSource::vtkInternal::RangeEnumToStr(const PS2000
 {
 	switch (voltRange)
 	{
-		case PS2000_10MV:
-			return "PS2000_10MV";
-		case PS2000_20MV:
-			return "PS2000_20MV";
-		case PS2000_50MV:
-			return "PS2000_50MV";
-		case PS2000_100MV:
-			return "PS2000_100MV";
-		case PS2000_200MV:
-			return "PS2000_200MV";
-		case PS2000_500MV:
-			return "PS2000_500MV";
-		case PS2000_1V:
-			return "PS2000_1V";
-		case PS2000_2V:
-			return "PS2000_2V";
-		case PS2000_5V:
-			return "PS2000_5V";
-		case PS2000_10V:
-			return "PS2000_10V";
-		case PS2000_20V:
-			return "PS2000_20V";
-		case PS2000_50V:
-			return "PS2000_20V";
+	case PS2000_10MV:
+		return "PS2000_10MV";
+	case PS2000_20MV:
+		return "PS2000_20MV";
+	case PS2000_50MV:
+		return "PS2000_50MV";
+	case PS2000_100MV:
+		return "PS2000_100MV";
+	case PS2000_200MV:
+		return "PS2000_200MV";
+	case PS2000_500MV:
+		return "PS2000_500MV";
+	case PS2000_1V:
+		return "PS2000_1V";
+	case PS2000_2V:
+		return "PS2000_2V";
+	case PS2000_5V:
+		return "PS2000_5V";
+	case PS2000_10V:
+		return "PS2000_10V";
+	case PS2000_20V:
+		return "PS2000_20V";
+	case PS2000_50V:
+		return "PS2000_20V";
 	}
 }
 
@@ -515,7 +506,6 @@ PlusStatus vtkPlusPicoScopeDataSource::vtkInternal::SetupPicoScopeChannel(vtkInt
   }
   
   // set channel values
-	LOG_ERROR("range: " << settings.voltageRange)
   if (!ps2000_set_channel(this->Scope.handle, settings.channelNumber, TRUE, settings.coupling, settings.voltageRange))
   {
     LOG_ERROR("Failed to set PicoScope channel settings for channel: " << settings.channelNumber << ".");
@@ -541,19 +531,6 @@ void vtkPlusPicoScopeDataSource::vtkInternal::PrintChannelInfo(PICO_CHANNEL_SETT
 	LOG_INFO("Voltage Range: " << this->RangeEnumToStr(channelSettings.voltageRange));
 	LOG_INFO("PLUS source id: " << channelSettings.PlusSourceId);
 }
-
-//-------------------------------------------------------------------------------------------------
-PlusStatus vtkPlusPicoScopeDataSource::vtkInternal::SetPicoScopeTimebase(int timebase, int numSamples)
-{
-	return PLUS_FAIL;
-}
-
-//-------------------------------------------------------------------------------------------------
-PlusStatus SetPicoScopeTimebase(int timebase, int numSamples)
-{
-  return PLUS_SUCCESS;
-}
-
 
 //-------------------------------------------------------------------------------------------------
 vtkPlusPicoScopeDataSource::vtkPlusPicoScopeDataSource()
@@ -588,6 +565,13 @@ PlusStatus vtkPlusPicoScopeDataSource::ReadConfiguration(vtkXMLDataElement* root
   LOG_TRACE("vtkPlusPicoScopeDataSource::ReadConfiguration");
 
   XML_FIND_DEVICE_ELEMENT_REQUIRED_FOR_READING(deviceConfig, rootConfigElement);
+
+	XML_READ_SCALAR_ATTRIBUTE_REQUIRED(int, NumberOfSamples, deviceConfig);
+	if (this->NumberOfSamples > MAX_NUM_SAMPLES_PER_FRAME)
+	{
+		LOG_ERROR("Requested number of samples (" << this->NumberOfSamples << "( is larger than the maximum number of samples per frame (" << MAX_NUM_SAMPLES_PER_FRAME << ").");
+		return PLUS_FAIL;
+	}
 
   XML_FIND_NESTED_ELEMENT_REQUIRED(dataSourcesElement, deviceConfig, "DataSources");
   for (int nestedElementIndex = 0; nestedElementIndex < dataSourcesElement->GetNumberOfNestedElements(); nestedElementIndex++)
@@ -672,18 +656,19 @@ PlusStatus vtkPlusPicoScopeDataSource::Probe()
 //-------------------------------------------------------------------------------------------------
 PlusStatus vtkPlusPicoScopeDataSource::InternalConnect()
 {
-  LOG_TRACE("vtkPlusPicoScopeDataSource::InternalConnect");
+	LOG_TRACE("vtkPlusPicoScopeDataSource::InternalConnect");
 
-  // Connect to scope
-  this->Internal->Scope.handle = ps2000_open_unit();
-  
-  if (!this->Internal->Scope.handle)
-  {
-    // scope is not connected
-    LOG_ERROR("Failed to connect to PicoScope PS2000.");
-    return PLUS_FAIL;
-  }
+	// connect to scope
+	this->Internal->Scope.handle = ps2000_open_unit();
 
+	if (!this->Internal->Scope.handle)
+	{
+		// scope is not connected
+		LOG_ERROR("Failed to connect to PicoScope PS2000.");
+		return PLUS_FAIL;
+	}
+
+	// print device info
 	std::string psDeviceInfo;
 	psDeviceInfo += this->Internal->GetPicoScopeInfo();
 	LOG_INFO("PicoScope device info: " << std::endl << psDeviceInfo);
@@ -694,38 +679,69 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalConnect()
 	LOG_INFO("");
 	this->Internal->PrintChannelInfo(this->Internal->ChannelB);
 
+	// configure channels
 	if (this->Internal->SetupPicoScopeChannel(this->Internal->ChannelA) != PLUS_SUCCESS)
 	{
 		return PLUS_FAIL;
 	}
-	
 	if (this->Internal->SetupPicoScopeChannel(this->Internal->ChannelB) != PLUS_SUCCESS)
 	{
 		return PLUS_FAIL;
 	}
 
-	// Disable PicoScope trigger
-	int16_t  auto_trigger_ms = 0;
-	ps2000_set_trigger(this->Internal->Scope.handle, PS2000_NONE, 0, PS2000_RISING, 0, auto_trigger_ms);
+	// disable PicoScope trigger
+	ps2000_set_trigger(this->Internal->Scope.handle, PS2000_NONE, 0, PS2000_RISING, 0, 0);
+
+	// disable ETS (equivalent time sampling) mode
+	ps2000_set_ets(this->Internal->Scope.handle, PS2000_ETS_OFF, 0, 0);
 
 	/*  Find the maximum number of samples, the time interval (in time_units),
 	*   the most suitable time units, and the maximum oversample at the current timebase
 	*/
-	this->Internal->oversample = 1;
-	this->Internal->timebase = 10;
-	while (!ps2000_get_timebase(this->Internal->Scope.handle,
-		this->Internal->timebase,
-		this->Internal->no_of_samples,
-		&this->Internal->time_interval,
-		&this->Internal->time_units,
-		this->Internal->oversample,
-		&this->Internal->max_samples))
-		this->Internal->timebase++;
+
+	bool timebaseSelected = false;
+	int16_t timebase;
+	int32_t timeInterval;
+	int16_t timeUnits;
+	int16_t oversample;
+	int32_t maxSamples;
+	for (timebase = 0; timebase <= this->Internal->Scope.maxTimebase; ++timebase)
+	{
+		int16_t timebaseResult = ps2000_get_timebase(
+			this->Internal->Scope.handle,
+			timebase,
+			this->NumberOfSamples,
+			&timeInterval,
+			&timeUnits,
+			0, // no oversampling
+			&maxSamples
+		);
+
+		if (timeInterval == NULL || timeUnits == NULL || maxSamples == NULL)
+		{
+			continue;
+		}
+
+		if (timebaseResult != 0 && maxSamples > this->NumberOfSamples)
+		{
+			timebaseSelected = true;
+			this->Internal->AppliedNumberOfSamples = maxSamples;
+			this->Internal->AppliedTimeUnits = timeUnits;
+			this->Internal->AppliedTimebase = timebase;
+			break;
+		}
+	}
+
+	if (!timebaseSelected)
+	{
+		LOG_ERROR("Failed to select PicoScope timebase. Please choose a different number of samples.");
+		return PLUS_FAIL;
+	}
 
 	// Setup images to hold channel data
-  this->Internal->SignalAImage->SetDimensions(BUFFER_SIZE, 2, 1);
+  this->Internal->SignalAImage->SetDimensions(this->NumberOfSamples, 2, 1);
   this->Internal->SignalAImage->AllocateScalars(VTK_FLOAT, 1);
-	this->Internal->SignalBImage->SetDimensions(BUFFER_SIZE, 2, 1);
+	this->Internal->SignalBImage->SetDimensions(this->NumberOfSamples, 2, 1);
 	this->Internal->SignalBImage->AllocateScalars(VTK_FLOAT, 1);
 
   return PLUS_SUCCESS;
@@ -760,46 +776,53 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 {
   LOG_TRACE("vtkPlusPicoScopeDataSource::InternalUpdate");
   
-  /* Start it collecting,
-  *  then wait for completion
-  */
+  // Start scope collecting
+	int32_t timeIndisposedMs;
+  ps2000_run_block(
+		this->Internal->Scope.handle,
+		this->Internal->AppliedNumberOfSamples,
+		this->Internal->AppliedTimebase,
+		0, // no oversampling
+		&timeIndisposedMs
+	);
 
-  ps2000_run_block(this->Internal->Scope.handle, this->Internal->no_of_samples, this->Internal->timebase, this->Internal->oversample, &this->Internal->time_indisposed_ms);
+	LOG_INFO("time indisposed(ms): " << timeIndisposedMs);
 
-  while (!ps2000_ready(this->Internal->Scope.handle))
+  if (!ps2000_ready(this->Internal->Scope.handle))
   {
-    vtkIGSIOAccurateTimer::Delay(10);
+		// no fresh data yet
+		return PLUS_SUCCESS;
   }
 
   ps2000_stop(this->Internal->Scope.handle);
 
-	int16_t chA_values[BUFFER_SIZE];
-	int16_t chB_values[BUFFER_SIZE];
-  int32_t times[BUFFER_SIZE];
-	LOG_WARNING("Num samples" << this->Internal->no_of_samples);
-	this->Internal->timebase = 1;
-  int res = ps2000_get_times_and_values(
+	int16_t overflow;
+  ps2000_get_times_and_values(
     this->Internal->Scope.handle,
-    times,
-    chA_values,
-    chB_values,
+    this->Internal->Times,
+    this->Internal->SignalARaw,
+    this->Internal->SignalBRaw,
     NULL,
     NULL,
-    &this->Internal->overflow,
-		1,
-		this->Internal->no_of_samples);
+    &overflow,
+		this->Internal->AppliedTimeUnits,
+		this->Internal->AppliedNumberOfSamples
+	);
+	
+	if (overflow != 0)
+	{
+		LOG_WARNING("PicoScope overflow occurred in InternalUpdate.");
+	}
 
-	LOG_ERROR(res);
-
-	int rangeMv = this->Internal->RangeEnumToInt(this->Internal->ChannelA.voltageRange);
+	int channelARangeMv = this->Internal->RangeEnumToInt(this->Internal->ChannelA.voltageRange);
   if (this->Internal->ChannelA.enabled == true)
   {
 		LOG_INFO("First 10 readings");
-		LOG_INFO("Time(" << this->Internal->GetAdcUnits(this->Internal->time_units) << " Values\n", );
+		LOG_INFO("Time(" << this->Internal->GetAdcUnits(this->Internal->AppliedTimeUnits) << ") Values\n", );
 
-		for (int i = 0; i < 100; i++)
+		for (int i = 0; i < 10; i++)
 		{
-			LOG_INFO(i << ": " << this->Internal->AdcToMv(chA_values[i], this->Internal->RangeEnumToInt(this->Internal->ChannelA.voltageRange)));
+			LOG_INFO(i << ": " << this->Internal->AdcToMv(this->Internal->SignalARaw[i], channelARangeMv));
 		}
     //int signal;
     //int max = -1000000;
