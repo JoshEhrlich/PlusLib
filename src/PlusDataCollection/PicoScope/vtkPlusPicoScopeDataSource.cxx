@@ -181,8 +181,8 @@ protected:
 	int16_t SignalARaw[MAX_NUM_SAMPLES_PER_FRAME];
 	int16_t SignalBRaw[MAX_NUM_SAMPLES_PER_FRAME];
 	int32_t Times[MAX_NUM_SAMPLES_PER_FRAME];
-  vtkSmartPointer<vtkImageData> SignalAImage = vtkSmartPointer<vtkImageData>::New();
-	vtkSmartPointer<vtkImageData> SignalBImage = vtkSmartPointer<vtkImageData>::New();
+	float SignalABuffer[2 * MAX_NUM_SAMPLES_PER_FRAME];
+	float SignalBBuffer[2 * MAX_NUM_SAMPLES_PER_FRAME];
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -738,11 +738,34 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalConnect()
 		return PLUS_FAIL;
 	}
 
-	// Setup images to hold channel data
-  this->Internal->SignalAImage->SetDimensions(this->NumberOfSamples, 2, 1);
-  this->Internal->SignalAImage->AllocateScalars(VTK_FLOAT, 1);
-	this->Internal->SignalBImage->SetDimensions(this->NumberOfSamples, 2, 1);
-	this->Internal->SignalBImage->AllocateScalars(VTK_FLOAT, 1);
+	if (this->Internal->ChannelA.enabled)
+	{
+		vtkPlusDataSource* chASource(NULL);
+		this->GetVideoSource(this->Internal->ChannelA.PlusSourceId.c_str(), chASource);
+		if (chASource->GetNumberOfItems() == 0)
+		{
+			LOG_INFO("Setting up Channel A data source.");
+			chASource->SetInputImageOrientation(US_IMG_ORIENT_MF);
+			chASource->SetImageType(US_IMG_BRIGHTNESS);
+			chASource->SetPixelType(VTK_FLOAT);
+			chASource->SetNumberOfScalarComponents(1);
+			chASource->SetInputFrameSize(this->NumberOfSamples, 2, 1);
+		}
+	}
+	if (this->Internal->ChannelB.enabled)
+	{
+		vtkPlusDataSource* chBSource(NULL);
+		this->GetVideoSource(this->Internal->ChannelB.PlusSourceId.c_str(), chBSource);
+		if (chBSource->GetNumberOfItems() == 0)
+		{
+			LOG_INFO("Setting up Channel B data source.");
+			chBSource->SetInputImageOrientation(US_IMG_ORIENT_MF);
+			chBSource->SetImageType(US_IMG_BRIGHTNESS);
+			chBSource->SetPixelType(VTK_FLOAT);
+			chBSource->SetNumberOfScalarComponents(1);
+			chBSource->SetInputFrameSize(this->NumberOfSamples, 2, 1);
+		}
+	}
 
   return PLUS_SUCCESS;
 }
@@ -786,13 +809,12 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 		&timeIndisposedMs
 	);
 
-	LOG_INFO("time indisposed(ms): " << timeIndisposedMs);
-
-  if (!ps2000_ready(this->Internal->Scope.handle))
+  while (!ps2000_ready(this->Internal->Scope.handle))
   {
 		// no fresh data yet
-		return PLUS_SUCCESS;
   }
+
+	const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
 
   ps2000_stop(this->Internal->Scope.handle);
 
@@ -817,89 +839,58 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 	int channelARangeMv = this->Internal->RangeEnumToInt(this->Internal->ChannelA.voltageRange);
   if (this->Internal->ChannelA.enabled == true)
   {
-		LOG_INFO("First 10 readings");
-		LOG_INFO("Time(" << this->Internal->GetAdcUnits(this->Internal->AppliedTimeUnits) << ") Values\n", );
-
-		for (int i = 0; i < 10; i++)
+		for (int i = 0; i < this->NumberOfSamples; i++)
 		{
-			LOG_INFO(i << ": " << this->Internal->AdcToMv(this->Internal->SignalARaw[i], channelARangeMv));
+			this->Internal->SignalABuffer[i] = (float) this->Internal->Times[i];
+			this->Internal->SignalABuffer[i+this->NumberOfSamples] = this->Internal->AdcToMv(this->Internal->SignalARaw[i], channelARangeMv);
 		}
-    //int signal;
-    //int max = -1000000;
-    //int mean = 0;
-    //for (int i = 0; i < BUFFER_SIZE; i++)
-    //{
-    //  signal = (int)this->Internal->Scope.channelSettings[PS2000_CHANNEL_A].values[i];
-    //  if (signal > max)
-    //  {
-    //    max = signal;
-    //  }
-    //  mean += (abs(signal));
-    //}
-    //mean = mean / BUFFER_SIZE;
-    //
-    //// put max/mean in transorm and add to buffer
-    //vtkNew<vtkMatrix4x4> sigmaxTransform;
-    //sigmaxTransform->Identity();
-    //sigmaxTransform->SetElement(0, 3, max);
-    //sigmaxTransform->SetElement(1, 3, mean);
-    //igsioTransformName toolTransformName(this->Internal->ChannelA.toolId, this->GetToolReferenceFrameName());
-    //std::string toolSourceId = toolTransformName.GetTransformName();
-    //const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
-    //ToolTimeStampedUpdate(toolSourceId, sigmaxTransform.Get(), TOOL_OK, this->FrameNumber, unfilteredTimestamp);
+
+		vtkPlusDataSource* chASource(NULL);
+	
+		if (this->GetVideoSource(this->Internal->ChannelA.PlusSourceId.c_str(), chASource) != PLUS_SUCCESS)
+		{
+			LOG_ERROR("couldnt find source");
+		}
+
+		FrameSizeType frameSize = { this->NumberOfSamples, 2, 1 };
+		PlusStatus res = chASource->AddItem(
+			this->Internal->SignalABuffer,
+			US_IMG_ORIENT_MF,
+			frameSize,
+			VTK_FLOAT,
+			1,
+			US_IMG_BRIGHTNESS,
+			0,
+			this->FrameNumber,
+			unfilteredTimestamp
+		);
   }
   
+	int channelBRangeMv = this->Internal->RangeEnumToInt(this->Internal->ChannelB.voltageRange);
   if (this->Internal->ChannelB.enabled == true)
   {
-    //int signal;
-    //int max = -1000000;
-    //int mean = 0;
-    //for (int i = 0; i < BUFFER_SIZE; i++)
-    //{
-    //  signal = (int)this->Internal->Scope.channelSettings[PS2000_CHANNEL_B].values[i];
-    //  if (signal > max)
-    //  {
-    //    max = signal;
-    //  }
-    //  mean += (abs(signal));
-    //}
-    //mean = mean / BUFFER_SIZE;
+		for (int i = 0; i < this->NumberOfSamples; i++)
+		{
+			this->Internal->SignalBBuffer[i] = (float) this->Internal->Times[i];
+			this->Internal->SignalBBuffer[i+this->NumberOfSamples] = this->Internal->AdcToMv(this->Internal->SignalBRaw[i], channelBRangeMv);
+		}
 
-    //// put max/mean in transorm and add to buffer
-    //vtkNew<vtkMatrix4x4> sigmaxTransform;
-    //sigmaxTransform->Identity();
-    //sigmaxTransform->SetElement(0, 3, max);
-    //sigmaxTransform->SetElement(1, 3, mean);
-    //igsioTransformName toolTransformName(this->Internal->ChannelB.toolId, this->GetToolReferenceFrameName());
-    //std::string toolSourceId = toolTransformName.GetTransformName();
-    //const double unfilteredTimestamp = vtkIGSIOAccurateTimer::GetSystemTime();
-    //ToolTimeStampedUpdate(toolSourceId, sigmaxTransform.Get(), TOOL_OK, this->FrameNumber, unfilteredTimestamp);
+		vtkPlusDataSource* chBSource(NULL);
+		this->GetVideoSource(this->Internal->ChannelB.PlusSourceId.c_str(), chBSource);
+
+		FrameSizeType frameSize = { this->NumberOfSamples, 2, 1 };
+		PlusStatus res = chBSource->AddItem(
+			this->Internal->SignalBBuffer,
+			US_IMG_ORIENT_MF,
+			frameSize,
+			VTK_FLOAT,
+			1,
+			US_IMG_BRIGHTNESS,
+			0,
+			this->FrameNumber,
+			unfilteredTimestamp
+		);
   }
-
-  // TODO: Send signal vector as ndarray over openigtlink
-  //// transfer data into image
-  //vtkPlusDataSource* aSource(NULL);
-  //if (this->GetFirstVideoSource(aSource) != PLUS_SUCCESS)
-  //{
-  //  LOG_ERROR("Unable to retrieve the video source in the PicoScope device.");
-  //  return PLUS_FAIL;
-  //}
-
-  //FrameSizeType frameSizeInPx = { BUFFER_SIZE, 1, 1 };
-
-  //if (aSource->GetNumberOfItems() == 0)
-  //{
-  //  // initialize the video source
-  //  aSource->SetImageType(US_IMG_TYPE_XX);
-  //  aSource->SetPixelType(VTK_INT);
-  //  aSource->SetNumberOfScalarComponents(1);
-  //  aSource->SetInputFrameSize(frameSizeInPx);
-  //  aSource->SetInputImageOrientation(US_IMG_ORIENT_MF);
-  //}
-
-  //
-  //aSource->AddItem(this->Internal->SignalImage, US_IMG_ORIENT_MF, US_IMG_TYPE_XX, this->FrameNumber);
-  //this->Modified();
 
   this->FrameNumber++;
  
