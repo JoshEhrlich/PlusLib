@@ -62,7 +62,8 @@ OPTION(PLUS_USE_LEAPMOTION "Provide support for the LeapMotion hand tracker" OFF
 IF(PLUS_USE_LEAPMOTION)
   OPTION(PLUS_TEST_LEAPMOTION "Enable testing for LeapMotion device" OFF)
 ENDIF()
-OPTION(PLUS_USE_CLARIUS "Provide support for Clarius ultrasound probes" OFF)OPTION(PLUS_USE_STEAMVR "Provide support for the SteamVR tracking system" OFF)
+OPTION(PLUS_USE_CLARIUS "Provide support for Clarius ultrasound probes" OFF)
+OPTION(PLUS_USE_STEAMVR "Provide support for the SteamVR tracking system" OFF)
 OPTION(PLUS_USE_PICOSCOPE "Provide support for PicoScope 2xxx series oscilloscopes" OFF)
 
 OPTION(PLUS_TEST_ULTRASONIX "Enable testing of acquisition from Ultrasonix ultrasound systems. Enable this only if an Ultrasonix device accessible from this computer." OFF)
@@ -822,21 +823,21 @@ IF(PLUS_USE_PICOSCOPE)
 
   LIST(APPEND ${PROJECT_NAME}_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/PicoScope
-    ${PICOSCOPE_SDK_INCLUDE_DIR}
+    ${PicoScopeSDK_INCLUDE_DIR}
     )
   
   IF(WIN32)
     LIST(APPEND ${PROJECT_NAME}_LIBS
-      ${PICOSCOPE_SDK_LIBRARY_DIR}/ps2000${CMAKE_STATIC_LIBRARY_SUFFIX}
+      ${PicoScopeSDK_LIBRARY_DIR}/ps2000${CMAKE_STATIC_LIBRARY_SUFFIX}
       )
   ELSE()
     LIST(APPEND ${PROJECT_NAME}_LIBS
-      ${PICOSCOPE_SDK_LIBRARY_DIR}/ps2000${CMAKE_SHARED_LIBRARY_SUFFIX}
+      ${PicoScopeSDK_LIBRARY_DIR}/ps2000${CMAKE_SHARED_LIBRARY_SUFFIX}
       )
   ENDIF()
 
   LIST(APPEND External_Libraries_Install
-    ${PICOSCOPE_SDK_BINARY_DIR}/ps2000${CMAKE_SHARED_LIBRARY_SUFFIX}
+    ${PicoScopeSDK_BINARY_DIR}/ps2000${CMAKE_SHARED_LIBRARY_SUFFIX}
     )
     
 ENDIF()
