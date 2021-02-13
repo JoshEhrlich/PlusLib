@@ -133,9 +133,6 @@ public:
 		int16_t channelNumber = -1; // 0=A, 1=B
     COUPLING coupling = DC;
     PS2000_RANGE voltageRange = PS2000_20V; 
-		// PLUS internals to handle this channel
-    std::string PlusSourceId = "";
-    vtkPlusDataSource* PlusSource = nullptr;
   } PICO_CHANNEL_SETTINGS;
 
   // METHODS
@@ -181,8 +178,11 @@ protected:
 	int16_t SignalARaw[MAX_NUM_SAMPLES_PER_FRAME];
 	int16_t SignalBRaw[MAX_NUM_SAMPLES_PER_FRAME];
 	int32_t Times[MAX_NUM_SAMPLES_PER_FRAME];
-	float SignalABuffer[2 * MAX_NUM_SAMPLES_PER_FRAME];
-	float SignalBBuffer[2 * MAX_NUM_SAMPLES_PER_FRAME];
+	float SignalBuffer[3 * MAX_NUM_SAMPLES_PER_FRAME];
+
+	// PLUS channel members
+	std::string PlusSourceId = "";
+	vtkPlusDataSource* PlusSource = nullptr;
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -529,7 +529,6 @@ void vtkPlusPicoScopeDataSource::vtkInternal::PrintChannelInfo(PICO_CHANNEL_SETT
 	LOG_INFO("Enabled: " << (channelSettings.enabled ? "TRUE" : "FALSE"));
 	LOG_INFO("Coupling: " << ((channelSettings.coupling == vtkInternal::DC) ? "DC" : "AC"));
 	LOG_INFO("Voltage Range: " << this->RangeEnumToStr(channelSettings.voltageRange));
-	LOG_INFO("PLUS source id: " << channelSettings.PlusSourceId);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -595,40 +594,36 @@ PlusStatus vtkPlusPicoScopeDataSource::ReadConfiguration(vtkXMLDataElement* root
       continue;
     }
 
-    int channelNum;
-    XML_READ_SCALAR_ATTRIBUTE_NONMEMBER_REQUIRED(int, Channel, channelNum, channelDataElement);
-		vtkInternal::COUPLING coupling = vtkInternal::DC;
-		XML_READ_ENUM2_ATTRIBUTE_NONMEMBER_OPTIONAL(Coupling, coupling, channelDataElement, "AC", vtkInternal::AC, "DC", vtkInternal::DC);
-    int voltageRangeMv;
-    XML_READ_SCALAR_ATTRIBUTE_NONMEMBER_REQUIRED(int, VoltageRangeMv, voltageRangeMv, channelDataElement);
+	// set output source id
+	this->Internal->PlusSourceId = sourceId;
 
-		PS2000_RANGE voltageRange;
-		if (this->Internal->RangeIntToEnum(voltageRangeMv, voltageRange) != PLUS_SUCCESS)
-		{
-			return PLUS_FAIL;
-		}
+	// read Channel A settings
+	vtkInternal::COUPLING chA_coupling = vtkInternal::DC;
+	XML_READ_ENUM2_ATTRIBUTE_NONMEMBER_REQUIRED(ChACoupling, chA_coupling, channelDataElement, "AC", vtkInternal::AC, "DC", vtkInternal::DC);
+	int chA_voltageRangeMv;
+	XML_READ_SCALAR_ATTRIBUTE_NONMEMBER_REQUIRED(int, ChAVoltageRangeMv, chA_voltageRangeMv, channelDataElement);
+	PS2000_RANGE chA_voltageRange;
+	if (this->Internal->RangeIntToEnum(chA_voltageRangeMv, chA_voltageRange) != PLUS_SUCCESS)
+	{
+		return PLUS_FAIL;
+	}
+	this->Internal->ChannelA.enabled = true;
+	this->Internal->ChannelA.coupling = chA_coupling;
+	this->Internal->ChannelA.voltageRange = chA_voltageRange;
 
-    if (channelNum == 0)
-    {
-			// Channel A
-      this->Internal->ChannelA.enabled = true;
-      this->Internal->ChannelA.coupling = coupling;
-			this->Internal->ChannelA.voltageRange = voltageRange;
-      this->Internal->ChannelA.PlusSourceId = sourceId;
-    }
-    else if (channelNum == 1)
-    {
-			// Channel B
-      this->Internal->ChannelB.enabled = true;
-      this->Internal->ChannelB.coupling = coupling;
-			this->Internal->ChannelB.voltageRange = voltageRange;
-      this->Internal->ChannelB.PlusSourceId = sourceId;
-    }
-    else
-    {
-      LOG_ERROR("Invalid channel number: " << channelNum << ". Options are 0 (Channel A), and 1 (Channel B, if supported by your hardware).");
-			return PLUS_FAIL;
-    }
+	// read Channel B settings
+	vtkInternal::COUPLING chB_coupling = vtkInternal::DC;
+	XML_READ_ENUM2_ATTRIBUTE_NONMEMBER_REQUIRED(ChBCoupling, chB_coupling, channelDataElement, "AC", vtkInternal::AC, "DC", vtkInternal::DC);
+	int chB_voltageRangeMv;
+	XML_READ_SCALAR_ATTRIBUTE_NONMEMBER_REQUIRED(int, ChBVoltageRangeMv, chB_voltageRangeMv, channelDataElement);
+	PS2000_RANGE chB_voltageRange;
+	if (this->Internal->RangeIntToEnum(chB_voltageRangeMv, chB_voltageRange) != PLUS_SUCCESS)
+	{
+		return PLUS_FAIL;
+	}
+	this->Internal->ChannelB.enabled = true;
+	this->Internal->ChannelB.coupling = chB_coupling;
+	this->Internal->ChannelB.voltageRange = chB_voltageRange;
   }
 
   return PLUS_SUCCESS;
@@ -738,33 +733,15 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalConnect()
 		return PLUS_FAIL;
 	}
 
-	if (this->Internal->ChannelA.enabled)
+	// configure the output source
+	this->GetVideoSource(this->Internal->PlusSourceId.c_str(), this->Internal->PlusSource);
+	if (this->Internal->PlusSource->GetNumberOfItems() == 0)
 	{
-		vtkPlusDataSource* chASource(NULL);
-		this->GetVideoSource(this->Internal->ChannelA.PlusSourceId.c_str(), chASource);
-		if (chASource->GetNumberOfItems() == 0)
-		{
-			LOG_INFO("Setting up Channel A data source.");
-			chASource->SetInputImageOrientation(US_IMG_ORIENT_MF);
-			chASource->SetImageType(US_IMG_BRIGHTNESS);
-			chASource->SetPixelType(VTK_FLOAT);
-			chASource->SetNumberOfScalarComponents(1);
-			chASource->SetInputFrameSize(this->NumberOfSamples, 2, 1);
-		}
-	}
-	if (this->Internal->ChannelB.enabled)
-	{
-		vtkPlusDataSource* chBSource(NULL);
-		this->GetVideoSource(this->Internal->ChannelB.PlusSourceId.c_str(), chBSource);
-		if (chBSource->GetNumberOfItems() == 0)
-		{
-			LOG_INFO("Setting up Channel B data source.");
-			chBSource->SetInputImageOrientation(US_IMG_ORIENT_MF);
-			chBSource->SetImageType(US_IMG_BRIGHTNESS);
-			chBSource->SetPixelType(VTK_FLOAT);
-			chBSource->SetNumberOfScalarComponents(1);
-			chBSource->SetInputFrameSize(this->NumberOfSamples, 2, 1);
-		}
+		this - Internal->PlusSource->SetInputImageOrientation(US_IMG_ORIENT_MF);
+		this->Internal->PlusSource->SetImageType(US_IMG_BRIGHTNESS);
+		this->Internal->PlusSource->SetPixelType(VTK_FLOAT);
+		this->Internal->PlusSource->SetNumberOfScalarComponents(1);
+		this->Internal->PlusSource->SetInputFrameSize(this->NumberOfSamples, 3, 1);
 	}
 
   return PLUS_SUCCESS;
@@ -837,60 +814,34 @@ PlusStatus vtkPlusPicoScopeDataSource::InternalUpdate()
 	}
 
 	int channelARangeMv = this->Internal->RangeEnumToInt(this->Internal->ChannelA.voltageRange);
-  if (this->Internal->ChannelA.enabled == true)
-  {
-		for (int i = 0; i < this->NumberOfSamples; i++)
-		{
-			this->Internal->SignalABuffer[i] = (float) this->Internal->Times[i];
-			this->Internal->SignalABuffer[i+this->NumberOfSamples] = this->Internal->AdcToMv(this->Internal->SignalARaw[i], channelARangeMv);
-		}
-
-		vtkPlusDataSource* chASource(NULL);
-	
-		if (this->GetVideoSource(this->Internal->ChannelA.PlusSourceId.c_str(), chASource) != PLUS_SUCCESS)
-		{
-			LOG_ERROR("couldnt find source");
-		}
-
-		FrameSizeType frameSize = { this->NumberOfSamples, 2, 1 };
-		PlusStatus res = chASource->AddItem(
-			this->Internal->SignalABuffer,
-			US_IMG_ORIENT_MF,
-			frameSize,
-			VTK_FLOAT,
-			1,
-			US_IMG_BRIGHTNESS,
-			0,
-			this->FrameNumber,
-			unfilteredTimestamp
-		);
-  }
-  
 	int channelBRangeMv = this->Internal->RangeEnumToInt(this->Internal->ChannelB.voltageRange);
-  if (this->Internal->ChannelB.enabled == true)
-  {
-		for (int i = 0; i < this->NumberOfSamples; i++)
-		{
-			this->Internal->SignalBBuffer[i] = (float) this->Internal->Times[i];
-			this->Internal->SignalBBuffer[i+this->NumberOfSamples] = this->Internal->AdcToMv(this->Internal->SignalBRaw[i], channelBRangeMv);
-		}
 
-		vtkPlusDataSource* chBSource(NULL);
-		this->GetVideoSource(this->Internal->ChannelB.PlusSourceId.c_str(), chBSource);
+	// update buffers
+	for (int i = 0; i < this->NumberOfSamples; i++)
+	{
+		this->Internal->SignalBuffer[i] = (float)this->Internal->Times[i];
+		this->Internal->SignalBuffer[i + this->NumberOfSamples] = this->Internal->AdcToMv(this->Internal->SignalARaw[i], channelARangeMv);
+		this->Internal->SignalBuffer[i + 2*this->NumberOfSamples] = this->Internal->AdcToMv(this->Internal->SignalBRaw[i], channelBRangeMv);
+	}
 
-		FrameSizeType frameSize = { this->NumberOfSamples, 2, 1 };
-		PlusStatus res = chBSource->AddItem(
-			this->Internal->SignalBBuffer,
-			US_IMG_ORIENT_MF,
-			frameSize,
-			VTK_FLOAT,
-			1,
-			US_IMG_BRIGHTNESS,
-			0,
-			this->FrameNumber,
-			unfilteredTimestamp
-		);
-  }
+	vtkPlusDataSource* source;
+	if (this->GetVideoSource(this->Internal->PlusSourceId.c_str(), source) != PLUS_SUCCESS)
+	{
+		LOG_ERROR("couldnt find source");
+	}
+
+	FrameSizeType frameSize = { this->NumberOfSamples, 3, 1 };
+	PlusStatus res = source->AddItem(
+		this->Internal->SignalBuffer,
+		US_IMG_ORIENT_MF,
+		frameSize,
+		VTK_FLOAT,
+		1,
+		US_IMG_BRIGHTNESS,
+		0,
+		this->FrameNumber,
+		unfilteredTimestamp
+	);
 
   this->FrameNumber++;
  
